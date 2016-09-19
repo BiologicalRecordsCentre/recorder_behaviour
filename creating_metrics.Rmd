@@ -1,0 +1,91 @@
+---
+title: "Metrics for Recorder behaviour"
+author: "Tom August"
+date: "19 September 2016"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+iRB <- read.csv('data/iRB.csv')
+```
+
+## Metrics
+
+We are going to split metric into three broad groups: *Engagement profile*, *Spatial*, and *Taxanomic*
+
+## Engagement Profile Metrics
+
+## Spatial Meterics
+
+## Taxanomic Metrics
+
+These metric relate the the species that people record
+
+### Taxanomic Breadth
+
+This is simply a measure of the proportion of taxa a person has recorded. Note this is going to be correlated to the number of records.
+
+```{r taxa_breadth, cache=TRUE}
+taxa_breadth <- function(data, recorder_name,
+                         sp_col = 'default_common_name',
+                         recorder_col = 'recorders'){
+  
+  data_rec <- data[data[,recorder_col] == recorder_name, c(sp_col, recorder_col)]
+  
+  return(data.frame(recorder = recorder_name,
+                    taxa_breadth = length(unique(data_rec[ ,sp_col])),
+                    taxa_prop = length(unique(data_rec[ ,sp_col]))/length(unique(data[ ,sp_col])),
+                    n = nrow(data_rec)))
+}
+
+taxa_breadth <- do.call(rbind, lapply(unique(iRB$recorders), FUN = taxa_breadth, data = iRB))
+
+temp <- taxa_breadth[taxa_breadth$n > 400, ]
+
+# Lets have a look at some people who have recorded a lot
+temp[order(temp$taxa_prop, decreasing = TRUE),]
+```
+
+### Species Rarity
+
+We want to capture the rarity of the species that people record. For example are they just recording the common species or are they only recording the rare ones, or perhaps they are recording everything. Since we dont know the real frequency distribution we can only compare people to the global average in the dataset. We can look to see what the distribution of species rank for each recorder is and how this compares to all records. A recorder only interested in rare species will have a median rank higher than the average. A recorder only recording common species will have a value lower than the average.
+
+
+```{r species_rank, cache=TRUE}
+# Lets look at a recorder
+species_rank <- function(data, recorder_name,
+                         sp_col = 'default_common_name',
+                         recorder_col = 'recorders'){
+  
+  data <- data[,c(sp_col, recorder_col)]
+  rank_species <- rank(abs(table(data[,sp_col])-max(table(data[,sp_col]))))
+  sp_counts <- table(data[,sp_col])
+  
+  rank_reps <- rep(rank_species, sp_counts)
+  grand_median <- median(rank_reps)
+  grand_sd <- sd(rank_reps)
+  
+  recorder_data <- data[data[,recorder_col] == recorder_name,]
+  recorder_data$rank <- rank_species[recorder_data$default_common_name]
+  
+  return(data.frame(recorder = as.character(recorder_name),
+                    median = median(recorder_data$rank),
+                    median_diff = median(recorder_data$rank) - grand_median,
+                    stdev = sd(recorder_data$rank),
+                    n = nrow(recorder_data)))
+}
+
+rarity_preference <- do.call(rbind, lapply(unique(iRB$recorders), FUN = species_rank, data = iRB))
+
+temp <- rarity_preference[rarity_preference$n > 400, ]
+
+# Lets have a look at some people who have recorded a lot
+temp[order(temp$median_diff, decreasing = TRUE),]
+
+```
+
+Here `median_diff` gives the difference between the grand median for all records and the recorders median. This suggests `Roy, David` prefers to record rare species and `Leaver, Kim` prefers to record common species.
+
+``````{r }
+```
