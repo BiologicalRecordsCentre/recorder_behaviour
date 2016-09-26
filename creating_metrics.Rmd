@@ -6,7 +6,7 @@ output: pdf_document
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(echo = TRUE, cache = TRUE)
 iRB <- read.csv('data/iRB.csv')
 ```
 
@@ -31,7 +31,7 @@ library(BRCmap)
 library(adehabitatHR)
 ```
 
-```{r spatialpoint, cache = TRUE}
+```{r spatialpoint}
 
 # Function takes data and username and returns spatial metrics
 spatial_behaviour <- function(data, recorder_name,
@@ -140,7 +140,7 @@ temp[order(temp$ratio, decreasing = TRUE),]
 
 Lets have a look at two people with very different ratios
 
-```{r plot ratios}
+```{r plot_ratios}
 # Get the names of top and bottom
 temp <- temp[order(temp$ratio, decreasing = TRUE),]
 
@@ -166,7 +166,7 @@ These metric relate the the species that people record
 
 This is simply a measure of the proportion of taxa a person has recorded. Note this is going to be correlated to the number of records.
 
-```{r taxa_breadth, cache=TRUE}
+```{r taxa_breadth}
 taxa_breadth <- function(data, recorder_name,
                          sp_col = 'preferred_taxon',
                          recorder_col = 'recorders'){
@@ -192,7 +192,7 @@ temp[order(temp$taxa_prop, decreasing = TRUE),]
 We want to capture the rarity of the species that people record. For example are they just recording the common species or are they only recording the rare ones, or perhaps they are recording everything. Since we dont know the real frequency distribution we can only compare people to the global average in the dataset. We can look to see what the distribution of species rank for each recorder is and how this compares to all records. A recorder only interested in rare species will have a median rank higher than the average. A recorder only recording common species will have a value lower than the average.
 
 
-```{r species_rank, cache=TRUE}
+```{r species_rank}
 # Lets look at a recorder
 species_rank <- function(data, recorder_name,
                          sp_col = 'preferred_taxon',
@@ -232,7 +232,7 @@ Here `median_diff` gives the difference between the grand median for all records
 
 This could be correlated to the number of records. 
 
-```{r rarity_nrec, cache = TRUE}
+```{r rarity_nrec}
 mod <- glm(median ~ log(n), data = rarity_preference, family = 'quasipoisson')
 summary(mod)
 plot(log(rarity_preference$n),
@@ -243,7 +243,7 @@ plot(log(rarity_preference$n),
 
 There is a significant negative relationship. The more records you make the lower your median value. This could be a result of the fact that people who make only a few records record rare stuff?
 
-```{r rarity_nrec_above, cache = TRUE}
+```{r rarity_nrec_above}
 rarity_preference_above <- rarity_preference[rarity_preference$n > 5, ]
 mod <- glm(median ~ log(n), data = rarity_preference_above, family = 'quasipoisson')
 summary(mod)
@@ -255,7 +255,7 @@ plot(log(rarity_preference_above$n),
 
 Okay, the relationship falls down once we get rid of the people who only record a few species. I suggest this metric not be estimates for people who contribute only a few records. The relationship might actually be between deviation from the median and `n`.
 
-```{r rarity_nrec_deviation, cache = TRUE}
+```{r rarity_nrec_deviation}
 rarity_preference$median_diff_abs <- abs(rarity_preference$median_diff)
 mod <- glm(median_diff_abs ~ log(n), data = rarity_preference, family = 'quasipoisson')
 summary(mod)
