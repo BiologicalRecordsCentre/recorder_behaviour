@@ -4,3 +4,5 @@
 .Ruserdata
 *.Rproj
 /data/
+/creating_metrics_cache/
+/creating_metrics_files/

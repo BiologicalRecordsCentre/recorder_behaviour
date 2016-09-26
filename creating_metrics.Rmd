@@ -1,7 +1,7 @@
 ---
 title: "Metrics for Recorder behaviour"
 author: "Tom August"
-date: "19 September 2016"
+date: "26 September 2016"
 output: pdf_document
 ---
 
@@ -16,7 +16,147 @@ We are going to split metric into three broad groups: *Engagement profile*, *Spa
 
 ## Engagement Profile Metrics
 
+
 ## Spatial Meterics
+
+These metrics deal with the spatial distribution of records
+
+### Area and heterogenity of recording
+
+I think the first step for all of these metrics is to turn the  points into a SpatialPoints object which will allow us to manipulate then more easily. Once we have done that we can calculate MCP (minimum convex polygons) around the points. We might want to change this method to a method that is less susseptible to outliers such as alpha hull (we can talk to Colin about this). Here I use 95% MCP as the total recording area (hopefully removing outliers), and use the ratio of 95%:50% as a measure of heterogenity.
+
+```{r libraries, echo = FALSE, message = FALSE}
+library(sp)
+library(BRCmap)
+library(adehabitatHR)
+```
+
+```{r spatialpoint, cache = TRUE}
+
+# Function takes data and username and returns spatial metrics
+spatial_behaviour <- function(data, recorder_name,
+                              latitude_col, longitude_col,
+                              recorder_col = 'recorders',
+                              upper_percentile = 95,
+                              lower_percentile = 50){
+  
+  if(is.factor(recorder_name)){
+    recorder_name <- as.character(recorder_name)
+  } 
+  
+  n_row <- nrow(iRB[iRB[,recorder_col] == recorder_name, ])
+  
+  if(n_row >= 5){
+  
+    # Convert to SpatialPoints
+    spPoints_LL <- SpatialPoints(iRB[iRB[,recorder_col] == recorder_name,
+                                     c(longitude_col, latitude_col)])
+    # Data is lat long
+    proj4string(spPoints_LL) <- CRS("+init=epsg:4326")
+  
+    # Convert to Eastings Northings to get meters on X and Y
+    spPoint_UK <- spTransform(spPoints_LL, "+init=epsg:27700")
+    
+    # Calculate the larger MCP 
+    mcp_poly_upper <- mcp(spPoint_UK,
+                          percent = upper_percentile,
+                          unin = 'm',
+                          unout = 'km2')
+    
+    # Calculate the smaller MCP 
+    mcp_poly_lower <- mcp(spPoint_UK,
+                          percent = lower_percentile,
+                          unin = 'm',
+                          unout = 'km2')
+    
+    return(list(recorder = recorder_name,
+                spPoint_UK = spPoint_UK,
+                mcp_poly_upper = mcp_poly_upper,
+                mcp_poly_lower = mcp_poly_lower,
+                upper_area = mcp_poly_upper$area,
+                lower_area = mcp_poly_lower$area,
+                ratio = mcp_poly_lower$area/mcp_poly_upper$area,
+                n = n_row))
+  } else {
+    return(list(recorder = recorder_name,
+                spPoint_UK = NA,
+                mcp_poly_upper = NA,
+                mcp_poly_lower = NA,
+                upper_area = NA,
+                lower_area = NA,
+                ratio = NA,
+                n = n_row))
+  }
+ 
+}
+
+# Test on one recorder
+David_spatial <- spatial_behaviour(data = iRB, recorder_name = 'Roy, David',
+                                   latitude_col = 'lat', longitude_col = 'st_x')
+
+# Function for plotting records
+plot_ratio <- function(data){
+  par(mfrow = c(1,2))
+  data(UK)
+  plot_GIS(UK, new.window = FALSE, main = 'Distribution of records')
+  points(data$spPoint_UK, pch = 3, col = 'blue')
+  
+  # Plot David's heat map
+  plot(data$spPoint_UK,
+       main = paste(data$recorder, '-', 'Ratio:', round(data$ratio, 4)),
+       col = 'blue')
+  upper_polygon <- data$mcp_poly_upper@polygons[[1]]@Polygons[[1]]@coords
+  polygon(x = upper_polygon[,1],
+        y = upper_polygon[,2])
+  lower_polygon <- data$mcp_poly_lower@polygons[[1]]@Polygons[[1]]@coords
+  polygon(x = lower_polygon[,1],
+        y = lower_polygon[,2], 
+        col = 'red', border = 'red')
+  par(mfrow = c(1,1))
+}
+
+# Plot
+plot_ratio(data = David_spatial)
+## NOTE DAVID HAS A RECORD FROM OUTSIDE THE UK ##
+
+# Apply to all recorders
+all_spatial <- lapply(unique(iRB$recorders), FUN = function(x){
+  recorder_info <- spatial_behaviour(data = iRB, recorder_name = x,
+                                     latitude_col = 'lat', longitude_col = 'st_x')
+  return(data.frame(recorder = recorder_info$recorder,
+                    upper_area = recorder_info$upper_area,
+                    lower_area = recorder_info$lower_area,
+                    ratio = recorder_info$ratio,
+                    n = recorder_info$n))
+})
+
+# combine results
+temp <- do.call(rbind, all_spatial)
+temp <- temp[temp$n > 400, ]
+
+# Lets have a look at some people who have recorded a lot
+temp[order(temp$ratio, decreasing = TRUE),]
+```
+
+Lets have a look at two people with very different ratios
+
+```{r plot ratios}
+# Get the names of top and bottom
+temp <- temp[order(temp$ratio, decreasing = TRUE),]
+
+top <- as.character(head(temp$recorder, 1))
+bottom <- as.character(tail(temp$recorder, 1))
+
+# Plot the top and bottom ratio recorder
+for(i in c(top, bottom)){
+  top_d <- spatial_behaviour(data = iRB,
+                             recorder_name = i,
+                             latitude_col = 'lat',
+                             longitude_col = 'st_x')
+  plot_ratio(data = top_d)
+}
+```
+
 
 ## Taxanomic Metrics
 
@@ -28,7 +168,7 @@ This is simply a measure of the proportion of taxa a person has recorded. Note t
 
 ```{r taxa_breadth, cache=TRUE}
 taxa_breadth <- function(data, recorder_name,
-                         sp_col = 'default_common_name',
+                         sp_col = 'preferred_taxon',
                          recorder_col = 'recorders'){
   
   data_rec <- data[data[,recorder_col] == recorder_name, c(sp_col, recorder_col)]
@@ -55,7 +195,7 @@ We want to capture the rarity of the species that people record. For example are
 ```{r species_rank, cache=TRUE}
 # Lets look at a recorder
 species_rank <- function(data, recorder_name,
-                         sp_col = 'default_common_name',
+                         sp_col = 'preferred_taxon',
                          recorder_col = 'recorders'){
   
   data <- data[,c(sp_col, recorder_col)]
@@ -67,7 +207,7 @@ species_rank <- function(data, recorder_name,
   grand_sd <- sd(rank_reps)
   
   recorder_data <- data[data[,recorder_col] == recorder_name,]
-  recorder_data$rank <- rank_species[recorder_data$default_common_name]
+  recorder_data$rank <- rank_species[recorder_data[ ,sp_col]]
   
   return(data.frame(recorder = as.character(recorder_name),
                     median = median(recorder_data$rank),
@@ -76,7 +216,10 @@ species_rank <- function(data, recorder_name,
                     n = nrow(recorder_data)))
 }
 
-rarity_preference <- do.call(rbind, lapply(unique(iRB$recorders), FUN = species_rank, data = iRB))
+rarity_preference <- do.call(rbind,
+                             lapply(unique(iRB$recorders),
+                                    FUN = species_rank,
+                                    data = iRB))
 
 temp <- rarity_preference[rarity_preference$n > 400, ]
 
@@ -85,7 +228,41 @@ temp[order(temp$median_diff, decreasing = TRUE),]
 
 ```
 
-Here `median_diff` gives the difference between the grand median for all records and the recorders median. This suggests `Roy, David` prefers to record rare species and `Leaver, Kim` prefers to record common species.
+Here `median_diff` gives the difference between the grand median for all records and the recorders median. This suggests `Saville, Simon` prefers to record rare species and `Cornish, Stephen` prefers to record common species.
 
-``````{r }
+This could be correlated to the number of records. 
+
+```{r rarity_nrec, cache = TRUE}
+mod <- glm(median ~ log(n), data = rarity_preference, family = 'quasipoisson')
+summary(mod)
+plot(log(rarity_preference$n),
+     rarity_preference$median,
+     xlab = 'log(N)',
+     ylab = 'Median rarity')
 ```
+
+There is a significant negative relationship. The more records you make the lower your median value. This could be a result of the fact that people who make only a few records record rare stuff?
+
+```{r rarity_nrec_above, cache = TRUE}
+rarity_preference_above <- rarity_preference[rarity_preference$n > 5, ]
+mod <- glm(median ~ log(n), data = rarity_preference_above, family = 'quasipoisson')
+summary(mod)
+plot(log(rarity_preference_above$n),
+     rarity_preference_above$median,
+     xlab = 'log(N)',
+     ylab = 'Median rarity')
+```
+
+Okay, the relationship falls down once we get rid of the people who only record a few species. I suggest this metric not be estimates for people who contribute only a few records. The relationship might actually be between deviation from the median and `n`.
+
+```{r rarity_nrec_deviation, cache = TRUE}
+rarity_preference$median_diff_abs <- abs(rarity_preference$median_diff)
+mod <- glm(median_diff_abs ~ log(n), data = rarity_preference, family = 'quasipoisson')
+summary(mod)
+plot(log(rarity_preference$n),
+     rarity_preference$median_diff_abs,
+     xlab = 'log(N)',
+     ylab = 'Difference in rarity')
+```
+
+The more records you record the less you deviate from the median. This is probably because you only get extreme values where the sample size is small.
