@@ -9,12 +9,246 @@ output: pdf_document
 knitr::opts_chunk$set(echo = TRUE, cache = TRUE)
 iRB <- read.csv('data/iRB.csv')
 ```
-
+```{r libraries, echo = FALSE, message = FALSE}
+library(sp)
+library(BRCmap)
+library(adehabitatHR)
+```
 ## Metrics
 
 We are going to split metric into three broad groups: *Engagement profile*, *Spatial*, and *Taxanomic*
 
-## Engagement Profile Metrics
+## Temporal Metrics
+
+These metrics measure the recording pattern across time such as the number of days that a recorder produces records. These have been termed engagement profiles by others., The metrics here are from Ponciano and Brasileiro 2014 who used the metrics on participant of zooniverse projects. The metrics were also used by Boakes *et al* 2016.
+
+### Activity ratio
+
+*"The proportion of days on which the volunteer was active in relation to the total days he/she remained linked to the project"* (Ponciano and Brasileiro 2014)
+
+```{r activity_ratio}
+# Create a function to calculate activity ratio
+activityRatio <- function(recorder_name,
+                          data,
+                          recorder_col = 'recorders',
+                          date_col = 'date_start',
+                          format = '%d/%m/%Y'){
+  
+  # Get the recorders data
+  data <- data[data[,recorder_col] == recorder_name, ]
+  
+  # Get unique dates as dates
+  dates <- as.Date(as.character(unique(data[,date_col])), format = format)
+  
+  # Get the first and last date
+  first_last <- range(dates)
+  
+  # Total duration of this recorder
+  duration <- as.numeric(first_last[2] - first_last[1]) + 1 
+  
+  # calculate ratio
+  activity_ratio <- length(dates)/duration
+  
+  # return
+  return(data.frame(recorder = recorder_name,
+                    activity_ratio = activity_ratio,
+                    total_duration = duration,
+                    active_days = length(dates)))
+  
+}
+
+# Test on David and Tom
+activityRatio(data = iRB, recorder_name = 'Roy, David')
+activityRatio(data = iRB, recorder_name = 'August, Tom')
+
+## David is a more active recorder than Tom ##
+
+# Run for everyone
+all_AR <- do.call(rbind, lapply(X = unique(iRB$recorders),
+                                FUN = activityRatio,
+                                data = iRB))
+
+# Lets have a look at some of these
+head(all_AR, 20)
+```
+
+I think this metric tells a story in a combination of the ratio and the total number of days. I think the ratio means more when the recorder has been recording for a long duration
+
+```{r plot_activity_ratio1}
+# Have a look at the distribution of these 2 metrics
+hist(all_AR$total_duration, xlim = c(0, 2000), breaks = 100)
+hist(all_AR$activity_ratio)
+```
+
+Both have nice distributions, though we can see the single record people in the ratio plot
+
+```{r plot_activity_ratio2}
+# Plot activity_ratio against duration
+plot(log(all_AR$total_duration),
+     all_AR$activity_ratio)
+
+```
+
+### Yearly devoted days
+
+This is an adaptation of the *Daily Devoted Time* in (Ponciano and Brasileiro 2014) which is clearly not applicable to biological recording. Though Boakes *et al* 2016 don't attempt to use this measure I think the idea can be adapted by using days in a year rather than hours in a day. If we want to get a really good number we should probably remove the first and last year of recording as the user probably joined and left part way though the year, but I don't do that here.
+
+```{r yearly_devoted_days}
+# Create a function
+yearlyDevotedDays <- function(recorder_name,
+                              data,
+                              recorder_col = 'recorders',
+                              date_col = 'date_start',
+                              format = '%d/%m/%Y'){
+  
+  # Get the recorders data
+  data <- data[data[,recorder_col] == recorder_name, ]
+  
+  # Get unique dates as dates
+  dates <- as.Date(as.character(unique(data[,date_col])), format = format)
+  
+  # here are the counts
+  year_counts <- table(as.numeric(format(dates, '%Y')))
+  
+  # As these are counts taking the median is probably best
+  yearly_devoted_days <- median(year_counts)
+  
+  return(data.frame(recorder = recorder_name,
+                    yearly_devoted_days = yearly_devoted_days,
+                    n_years = length(year_counts),
+                    n_recs = sum(year_counts)))
+}
+
+# Test on David and Tom
+yearlyDevotedDays(data = iRB, recorder_name = 'Roy, David')
+yearlyDevotedDays(data = iRB, recorder_name = 'August, Tom')
+
+## David contributes more of his time than Tom ##
+
+# Run for everyone
+all_YDD <- do.call(rbind, lapply(X = unique(iRB$recorders),
+                                FUN = yearlyDevotedDays,
+                                data = iRB))
+
+# Lets have a look at some of these
+head(all_YDD, 20)
+```
+
+Clearly this metric is only really reliable when we have multiple years worth of data for an individual, which by definition takes them out of the 'casual user' type category.
+
+### Relative activity duration
+
+This is a metric from Ponciano and Brasileiro 2014 which is also used in Boakes *et al* 2016 but I don't think can be applied to biological records since there is no official end date for a project: *"The ratio of days during which a volunteer i remains linked to the project in relation to the total number of days elapsed since the volunteer joined the project until the project is over"
+
+### Periodicity
+
+There is a cluster of metrics that could be used to look at aspects of periodicity. The measure used in Ponciano and Brasileiro 2014 is 'variation in periodicity'; *"The standard deviation of the times elapsed between each pair of sequential active days"*. At the same time as calculating this I think there are another couple of metrics that might be of use. First, periodicity itself, i.e. "The median time elapsed between each pair of sequential active days". Secondly, streak length, i.e. "The average length of sequential active days"
+
+```{r periodicity}
+# Create a function to calculate the periodicity metrics
+periodicity <- function(recorder_name,
+                        data,
+                        recorder_col = 'recorders',
+                        date_col = 'date_start',
+                        format = '%d/%m/%Y',
+                        day_limit = 5){
+  
+  # Get the recorders data
+  data <- data[data[,recorder_col] == recorder_name, ]
+  
+  # Get unique dates as dates
+  dates <- sort(as.Date(as.character(unique(data[,date_col])), format = format))
+  
+  # we cannot calculate these metrics if people have very few
+  # dates on which they record
+  if(length(unique(dates)) < day_limit){
+    
+    # return
+    return(data.frame(recorder = recorder_name,
+                      periodicity = NA,
+                      periodicity_variation = NA,
+                      median_streak = NA,
+                      sd_streak = NA,
+                      max_streak = NA,
+                      n_days = length(unique(dates))))
+      
+  } else {
+    
+    # Calculate the elapsed days between each date in sequence
+    elapses <- sapply(1:(length(dates)-1),
+         FUN = function(x){
+           return(as.numeric(dates[x + 1] - dates[x]))
+         })
+  
+  # periodicity calculation
+  periodicity <- median(elapses)
+  
+  # variation in periodicity
+  periodicity_variation <- sd(elapses)
+  
+  # average streak length
+  # Streaks are IDed by 1's
+  non_streak <- length(elapses[elapses > 1])
+  streaks <- rle(elapses)
+  streaks_1 <- (streaks$lengths[streaks$value == 1]) + 1
+  
+  # Combine streaks and non-streaks
+  streak_lengths <- c(rep(1, non_streak), streaks_1)
+  
+  # calculate ome metrics
+  median_streak <- median(streak_lengths)
+  sd_streak <- sd(streak_lengths)
+  max_streak <- max(streak_lengths)
+  
+  # return
+  return(data.frame(recorder = recorder_name,
+                    periodicity = periodicity,
+                    periodicity_variation = periodicity_variation,
+                    median_streak = median_streak,
+                    sd_streak = sd_streak,
+                    max_streak = max_streak,
+                    n_days = length(unique(dates))))
+    
+  }
+  
+  
+}
+
+# Test on David and Tom
+periodicity(data = iRB, recorder_name = 'Roy, David')
+periodicity(data = iRB, recorder_name = 'August, Tom')
+
+# David is a much more regular recorder than Tom with less
+# variation in periodicity and a longer max streak though
+# Tom has less days of data to work with
+
+# Run for everyone
+all_P <- do.call(rbind, lapply(X = unique(iRB$recorders),
+                               FUN = periodicity,
+                               data = iRB))
+
+# Lets have a look at some of these
+head(all_P, 20)[c(5,8,1),]
+
+# David a Tam are both very studious recorders with
+# long max streaks and very low periodicity. David is
+# perhaps more studious as he has a lower periodicity variation
+# Anne is less studious but still has a low periodicity
+
+# Nice poission dist. for periodicity
+hist(all_P$periodicity[all_P$periodicity < 50],
+     breaks = 100)
+
+# Nice poission dist. for periodicity_variation (long tail)
+hist(all_P$periodicity_variation[all_P$periodicity_variation < 200],
+     breaks = 100)
+
+# Dist. of max_streak
+hist(all_P$max_streak[all_P$max_streak < 20],
+     breaks = 20)
+```
+
+There are some issues with `periodicity_variation` here; I think because most people will have large gaps over the summer and small gaps over the winter, I think this might make the `periodicity` (the median of elapses) a better metric in this case. These metrics cannot be calculate for people who have only made one record. I have included a parameter `day_limit` to allow us to set a limit at which we calculate these metrics.
 
 
 ## Spatial Meterics
@@ -23,13 +257,8 @@ These metrics deal with the spatial distribution of records
 
 ### Area and heterogenity of recording
 
-I think the first step for all of these metrics is to turn the  points into a SpatialPoints object which will allow us to manipulate then more easily. Once we have done that we can calculate MCP (minimum convex polygons) around the points. We might want to change this method to a method that is less susseptible to outliers such as alpha hull (we can talk to Colin about this). Here I use 95% MCP as the total recording area (hopefully removing outliers), and use the ratio of 95%:50% as a measure of heterogenity.
+I think the first step for all of these metrics is to turn the  points into a SpatialPoints object which will allow us to manipulate then more easily. Once we have done that we can calculate MCP (minimum convex polygons) around the points. We might want to change this method to a method that is less susceptible to outliers such as alpha hull (we can talk to Colin about this). Here I use 95% MCP as the total recording area (hopefully removing outliers), and use the ratio of 95%:50% as a measure of heterogeneity.
 
-```{r libraries, echo = FALSE, message = FALSE}
-library(sp)
-library(BRCmap)
-library(adehabitatHR)
-```
 
 ```{r spatialpoint}
 
@@ -189,7 +418,7 @@ temp[order(temp$taxa_prop, decreasing = TRUE),]
 
 ### Species Rarity
 
-We want to capture the rarity of the species that people record. For example are they just recording the common species or are they only recording the rare ones, or perhaps they are recording everything. Since we dont know the real frequency distribution we can only compare people to the global average in the dataset. We can look to see what the distribution of species rank for each recorder is and how this compares to all records. A recorder only interested in rare species will have a median rank higher than the average. A recorder only recording common species will have a value lower than the average.
+We want to capture the rarity of the species that people record. For example are they just recording the common species or are they only recording the rare ones, or perhaps they are recording everything. Since we don't know the real frequency distribution we can only compare people to the global average in the dataset. We can look to see what the distribution of species rank for each recorder is and how this compares to all records. A recorder only interested in rare species will have a median rank higher than the average. A recorder only recording common species will have a value lower than the average.
 
 
 ```{r species_rank}
