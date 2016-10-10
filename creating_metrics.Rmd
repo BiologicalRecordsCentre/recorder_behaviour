@@ -1,7 +1,7 @@
 ---
 title: "Metrics for Recorder behaviour"
 author: "Tom August"
-date: "26 September 2016"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
 output: pdf_document
 ---
 
@@ -14,6 +14,20 @@ library(sp)
 library(BRCmap)
 library(adehabitatHR)
 ```
+```{r data_cleaning, echo = FALSE}
+# There are a range of data cleaning steps that I will probably need to do
+# I can put them in here
+
+# App started in 2014 so crop data to then
+iRB <- iRB[as.Date(as.character(iRB$date_start), format = '%d/%m/%Y') >= "2014-01-01", ]
+
+# Make the date column a date
+iRB$date_start <- as.Date(as.character(iRB$date_start), format = '%d/%m/%Y')
+
+# I need to mask the butterfly data (and other datasets)
+# to the UK as they are a bit all over the place
+```
+
 ## Metrics
 
 We are going to split metric into three broad groups: *Engagement profile*, *Spatial*, and *Taxanomic*
@@ -21,6 +35,85 @@ We are going to split metric into three broad groups: *Engagement profile*, *Spa
 ## Temporal Metrics
 
 These metrics measure the recording pattern across time such as the number of days that a recorder produces records. These have been termed engagement profiles by others., The metrics here are from Ponciano and Brasileiro 2014 who used the metrics on participant of zooniverse projects. The metrics were also used by Boakes *et al* 2016.
+
+### Summer period
+
+One issue that we have across these metrics and some others is that recording is not consistent across the year and so there can be issues with the numbers generated. To address this the data can be subset to only the summer period, when recorders are active. This period needs to be defined in such a way that the same method can be used across taxanomic groups and will be robust to changes in the start and end of teh summer period from year to year.
+
+I suggest we use a percentage cut off, for example take the period of the year that contains 90% of the data. Lets have a look at how this might work
+
+```{r summer_period}
+# First lets have a look at the distribution of 
+# records through the year
+jday <- as.POSIXlt(iRB$date_start)$yday
+
+# Where are the limits of different percentiles
+p95 <- quantile(jday, c(0.025,0.975))
+p90 <- quantile(jday, c(0.05,0.95))
+p80 <- quantile(jday, c(0.1,0.9))
+p70 <- quantile(jday, c(0.15,0.85))
+
+hist(jday, 100, main = paste('Histogram of recording day with\n',
+                             'cutoffs at 95%, 90%, 80%, & 70%'))
+abline(v = p95, lty = 1, col = 'darkred', lwd = 2)
+abline(v = p90, lty = 5, col = 'darkred', lwd = 2)
+abline(v = p80, lty = 2, col = 'darkred', lwd = 2)
+abline(v = p70, lty = 3, col = 'darkred', lwd = 2)
+
+```
+
+It looks like 90% might be a good value to go for in this case. We would then need a function that could create these values for each year of the data and throw out data that was outside the summer periods
+
+```{r summer_function}
+summerData <- function(data, probs = c(0.05, 0.95),
+                       date_col = 'date_start'){
+  
+  # check date column
+  if(!inherits(data[, date_col], 'Date')){
+    stop('Your date column is not a date')
+  }
+  
+  # create J-day column
+  data$Jday <- as.POSIXlt(data[,date_col])$yday
+  
+  # create year column
+  data$year <- as.POSIXlt(data[,date_col])$year+1900
+  
+  # create summer column
+  data$summer <- FALSE
+  
+  qsf <- qsl <- NULL  
+  
+  # now for each year loop through and create an 
+  # index column
+  for(i in sort(unique(data$year))){
+    
+    year_quantiles <- quantile(data$Jday[data$year == i], probs = probs)
+    qsf <- c(qsf, year_quantiles[1])
+    qsl <- c(qsl, year_quantiles[2])
+    data$summer[data$Jday >= year_quantiles[1]
+                & data$Jday <= year_quantiles[2] 
+                & data$year == i] <- TRUE
+  }
+  
+  summer_data <- data[data$summer, ]
+  attr(summer_data, 'cutoffs') <- data.frame(year = sort(unique(data$year)),
+                                             quantile_first = qsf,
+                                             quantile_last = qsl)  
+  return(summer_data)
+}
+
+summer_iRB <- summerData(data = iRB,
+                         probs = c(0.05, 0.95),
+                         date_col = 'date_start')
+
+# Look at the 'cut' data 
+hist(summer_iRB$Jday, 100)
+
+# Here are the cuts
+attr(summer_iRB, 'cutoffs')
+
+```
 
 ### Activity ratio
 
@@ -31,14 +124,27 @@ These metrics measure the recording pattern across time such as the number of da
 activityRatio <- function(recorder_name,
                           data,
                           recorder_col = 'recorders',
-                          date_col = 'date_start',
-                          format = '%d/%m/%Y'){
+                          date_col = 'date_start'){
+  
+  # check date column
+  if(!inherits(data[, date_col], 'Date')){
+    stop('Your date column is not a date')
+  }
   
   # Get the recorders data
   data <- data[data[,recorder_col] == recorder_name, ]
   
-  # Get unique dates as dates
-  dates <- as.Date(as.character(unique(data[,date_col])), format = format)
+  # Some people might have no data from the summer period
+  if(nrow(data) < 1){
+    
+    return(data.frame(recorder = recorder_name,
+                      activity_ratio = NA,
+                      total_duration = NA,
+                      active_days = NA))
+  } else {
+    
+    # Get unique dates
+  dates <- unique(data[,date_col])
   
   # Get the first and last date
   first_last <- range(dates)
@@ -54,19 +160,19 @@ activityRatio <- function(recorder_name,
                     activity_ratio = activity_ratio,
                     total_duration = duration,
                     active_days = length(dates)))
-  
+  }
 }
 
 # Test on David and Tom
-activityRatio(data = iRB, recorder_name = 'Roy, David')
-activityRatio(data = iRB, recorder_name = 'August, Tom')
+activityRatio(data = summer_iRB, recorder_name = 'Roy, David')
+activityRatio(data = summer_iRB, recorder_name = 'August, Tom')
 
 ## David is a more active recorder than Tom ##
 
 # Run for everyone
 all_AR <- do.call(rbind, lapply(X = unique(iRB$recorders),
                                 FUN = activityRatio,
-                                data = iRB))
+                                data = summer_iRB))
 
 # Lets have a look at some of these
 head(all_AR, 20)
@@ -76,7 +182,8 @@ I think this metric tells a story in a combination of the ratio and the total nu
 
 ```{r plot_activity_ratio1}
 # Have a look at the distribution of these 2 metrics
-hist(all_AR$total_duration, xlim = c(0, 2000), breaks = 100)
+# There looks like there could be an effect of year
+hist(all_AR$total_duration, breaks = 30)
 hist(all_AR$activity_ratio)
 ```
 
@@ -84,65 +191,76 @@ Both have nice distributions, though we can see the single record people in the 
 
 ```{r plot_activity_ratio2}
 # Plot activity_ratio against duration
-plot(log(all_AR$total_duration),
+# Here we probably want to subset to avoid bias
+plot(all_AR$total_duration,
      all_AR$activity_ratio)
 
+plot(all_AR$total_duration[all_AR$total_duration >= 10],
+     all_AR$activity_ratio[all_AR$total_duration >= 10])
 ```
 
-### Yearly devoted days
+### Weekly devoted days
 
-This is an adaptation of the *Daily Devoted Time* in (Ponciano and Brasileiro 2014) which is clearly not applicable to biological recording. Though Boakes *et al* 2016 don't attempt to use this measure I think the idea can be adapted by using days in a year rather than hours in a day. If we want to get a really good number we should probably remove the first and last year of recording as the user probably joined and left part way though the year, but I don't do that here.
+This is an adaptation of the *Daily Devoted Time* in (Ponciano and Brasileiro 2014) which is clearly not applicable to biological recording. Though Boakes *et al* 2016 don't attempt to use this measure I think the idea can be adapted by using days in a week (summer only) rather than hours in a day.
 
-```{r yearly_devoted_days}
+```{r weekly_devoted_days}
 # Create a function
-yearlyDevotedDays <- function(recorder_name,
+weeklyDevotedDays <- function(recorder_name,
                               data,
                               recorder_col = 'recorders',
-                              date_col = 'date_start',
-                              format = '%d/%m/%Y'){
+                              date_col = 'date_start'){
+  
+  # check date column
+  if(!inherits(data[, date_col], 'Date')){
+    stop('Your date column is not a date')
+  }
   
   # Get the recorders data
   data <- data[data[,recorder_col] == recorder_name, ]
   
   # Get unique dates as dates
-  dates <- as.Date(as.character(unique(data[,date_col])), format = format)
+  dates <- unique(data[,date_col])
+  
+  # Get all week_year combinations
+  week_year <- paste(strftime(as.POSIXlt(dates), format = '%W'),
+                     format(dates, '%Y'), sep = '_')
   
   # here are the counts
-  year_counts <- table(as.numeric(format(dates, '%Y')))
+  week_counts <- table(week_year)
   
   # As these are counts taking the median is probably best
-  yearly_devoted_days <- median(year_counts)
+  weekly_devoted_days <- median(week_counts)
   
   return(data.frame(recorder = recorder_name,
-                    yearly_devoted_days = yearly_devoted_days,
-                    n_years = length(year_counts),
-                    n_recs = sum(year_counts)))
+                    median_weekly_devoted_days = weekly_devoted_days,
+                    n_weeks = length(week_counts),
+                    n_recs = sum(week_counts), row.names = NULL))
 }
 
 # Test on David and Tom
-yearlyDevotedDays(data = iRB, recorder_name = 'Roy, David')
-yearlyDevotedDays(data = iRB, recorder_name = 'August, Tom')
+weeklyDevotedDays(data = summer_iRB, recorder_name = 'Roy, David')
+weeklyDevotedDays(data = summer_iRB, recorder_name = 'August, Tom')
 
 ## David contributes more of his time than Tom ##
 
 # Run for everyone
-all_YDD <- do.call(rbind, lapply(X = unique(iRB$recorders),
-                                FUN = yearlyDevotedDays,
-                                data = iRB))
+all_WDD <- do.call(rbind, lapply(X = unique(iRB$recorders),
+                                 FUN = weeklyDevotedDays,
+                                 data = summer_iRB))
 
 # Lets have a look at some of these
-head(all_YDD, 20)
+head(all_WDD, 20)
 ```
 
-Clearly this metric is only really reliable when we have multiple years worth of data for an individual, which by definition takes them out of the 'casual user' type category.
+Clearly this metric is only really reliable when we have multiple weeks worth of data for an individual.
 
 ### Relative activity duration
 
-This is a metric from Ponciano and Brasileiro 2014 which is also used in Boakes *et al* 2016 but I don't think can be applied to biological records since there is no official end date for a project: *"The ratio of days during which a volunteer i remains linked to the project in relation to the total number of days elapsed since the volunteer joined the project until the project is over"
+This is a metric from Ponciano and Brasileiro 2014 which is also used in Boakes *et al* 2016 but I don't think can be applied to biological records since there is no official end date for a project: *"The ratio of days during which a volunteer I remains linked to the project in relation to the total number of days elapsed since the volunteer joined the project until the project is over"*
 
 ### Periodicity
 
-There is a cluster of metrics that could be used to look at aspects of periodicity. The measure used in Ponciano and Brasileiro 2014 is 'variation in periodicity'; *"The standard deviation of the times elapsed between each pair of sequential active days"*. At the same time as calculating this I think there are another couple of metrics that might be of use. First, periodicity itself, i.e. "The median time elapsed between each pair of sequential active days". Secondly, streak length, i.e. "The average length of sequential active days"
+There is a cluster of metrics that could be used to look at aspects of periodicity. The measure used in Ponciano and Brasileiro 2014 is 'variation in periodicity'; *"The standard deviation of the times elapsed between each pair of sequential active days"*. At the same time as calculating this I think there are another couple of metrics that might be of use. First, periodicity itself, i.e. *"The median time elapsed between each pair of sequential active days"*. Secondly, streak length, i.e. *"The average length of sequential active days"*
 
 ```{r periodicity}
 # Create a function to calculate the periodicity metrics
@@ -150,14 +268,18 @@ periodicity <- function(recorder_name,
                         data,
                         recorder_col = 'recorders',
                         date_col = 'date_start',
-                        format = '%d/%m/%Y',
                         day_limit = 5){
+  
+  # check date column
+  if(!inherits(data[, date_col], 'Date')){
+    stop('Your date column is not a date')
+  }
   
   # Get the recorders data
   data <- data[data[,recorder_col] == recorder_name, ]
   
   # Get unique dates as dates
-  dates <- sort(as.Date(as.character(unique(data[,date_col])), format = format))
+  dates <- sort(unique(data[,date_col]))
   
   # we cannot calculate these metrics if people have very few
   # dates on which they record
@@ -175,39 +297,54 @@ periodicity <- function(recorder_name,
   } else {
     
     # Calculate the elapsed days between each date in sequence
-    elapses <- sapply(1:(length(dates)-1),
-         FUN = function(x){
-           return(as.numeric(dates[x + 1] - dates[x]))
-         })
+    # this needs to be done within years
+    elapses <- NULL
+    
+    for(year in unique(format(dates, '%Y'))){
+      
+      temp_dates <- dates[format(dates, '%Y') == year]
+       
+      # There must be at least 2 dates in a year
+      if(length(temp_dates) > 1){
+        temp_elapses <- sapply(1:(length(temp_dates)-1),
+           FUN = function(x){
+             return(as.numeric(temp_dates[x + 1] - temp_dates[x]))
+           })  
+      
+        elapses <- c(elapses, temp_elapses)
+      
+      }
+      
+    }
   
-  # periodicity calculation
-  periodicity <- median(elapses)
-  
-  # variation in periodicity
-  periodicity_variation <- sd(elapses)
-  
-  # average streak length
-  # Streaks are IDed by 1's
-  non_streak <- length(elapses[elapses > 1])
-  streaks <- rle(elapses)
-  streaks_1 <- (streaks$lengths[streaks$value == 1]) + 1
-  
-  # Combine streaks and non-streaks
-  streak_lengths <- c(rep(1, non_streak), streaks_1)
-  
-  # calculate ome metrics
-  median_streak <- median(streak_lengths)
-  sd_streak <- sd(streak_lengths)
-  max_streak <- max(streak_lengths)
-  
-  # return
-  return(data.frame(recorder = recorder_name,
-                    periodicity = periodicity,
-                    periodicity_variation = periodicity_variation,
-                    median_streak = median_streak,
-                    sd_streak = sd_streak,
-                    max_streak = max_streak,
-                    n_days = length(unique(dates))))
+    # periodicity calculation
+    periodicity <- median(elapses)
+    
+    # variation in periodicity
+    periodicity_variation <- sd(elapses)
+    
+    # average streak length
+    # Streaks are IDed by 1's
+    non_streak <- length(elapses[elapses > 1])
+    streaks <- rle(elapses)
+    streaks_1 <- (streaks$lengths[streaks$value == 1]) + 1
+    
+    # Combine streaks and non-streaks
+    streak_lengths <- c(rep(1, non_streak), streaks_1)
+    
+    # calculate ome metrics
+    median_streak <- median(streak_lengths)
+    sd_streak <- sd(streak_lengths)
+    max_streak <- max(streak_lengths)
+    
+    # return
+    return(data.frame(recorder = recorder_name,
+                      periodicity = periodicity,
+                      periodicity_variation = periodicity_variation,
+                      median_streak = median_streak,
+                      sd_streak = sd_streak,
+                      max_streak = max_streak,
+                      n_days = length(unique(dates))))
     
   }
   
@@ -215,8 +352,8 @@ periodicity <- function(recorder_name,
 }
 
 # Test on David and Tom
-periodicity(data = iRB, recorder_name = 'Roy, David')
-periodicity(data = iRB, recorder_name = 'August, Tom')
+periodicity(data = summer_iRB, recorder_name = 'Roy, David')
+periodicity(data = summer_iRB, recorder_name = 'August, Tom')
 
 # David is a much more regular recorder than Tom with less
 # variation in periodicity and a longer max streak though
@@ -231,13 +368,12 @@ all_P <- do.call(rbind, lapply(X = unique(iRB$recorders),
 head(all_P, 20)[c(5,8,1),]
 
 # David a Tam are both very studious recorders with
-# long max streaks and very low periodicity. David is
-# perhaps more studious as he has a lower periodicity variation
+# long max streaks and very low periodicity. 
 # Anne is less studious but still has a low periodicity
 
 # Nice poission dist. for periodicity
 hist(all_P$periodicity[all_P$periodicity < 50],
-     breaks = 100)
+     breaks = 50)
 
 # Nice poission dist. for periodicity_variation (long tail)
 hist(all_P$periodicity_variation[all_P$periodicity_variation < 200],
@@ -248,7 +384,7 @@ hist(all_P$max_streak[all_P$max_streak < 20],
      breaks = 20)
 ```
 
-There are some issues with `periodicity_variation` here; I think because most people will have large gaps over the summer and small gaps over the winter, I think this might make the `periodicity` (the median of elapses) a better metric in this case. These metrics cannot be calculate for people who have only made one record. I have included a parameter `day_limit` to allow us to set a limit at which we calculate these metrics.
+By using the summer data only this analysis seems to be better than an earlier one that included all data. These metrics cannot be calculate for people who have only made one record. I have included a parameter `day_limit` to allow us to set a limit at which we calculate these metrics.
 
 
 ## Spatial Meterics
@@ -490,6 +626,11 @@ mod <- glm(median_diff_abs ~ log(n), data = rarity_preference, family = 'quasipo
 summary(mod)
 plot(log(rarity_preference$n),
      rarity_preference$median_diff_abs,
+     xlab = 'log(N)',
+     ylab = 'Difference in rarity')
+
+plot(log(rarity_preference$n[rarity_preference$n >5]),
+     rarity_preference$median_diff_abs[rarity_preference$n >5],
      xlab = 'log(N)',
      ylab = 'Difference in rarity')
 ```
