@@ -7,25 +7,63 @@ output: pdf_document
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, cache = TRUE)
-iRB <- read.csv('data/iRB.csv')
 ```
 ```{r libraries, echo = FALSE, message = FALSE}
 library(sp)
 library(BRCmap)
 library(adehabitatHR)
+library(raster)
+library(Deducer)
 ```
 ```{r data_cleaning, echo = FALSE}
-# There are a range of data cleaning steps that I will probably need to do
-# I can put them in here
+# # There are a range of data cleaning steps that I will probably need to do
+# # I can put them in here
+# iRB <- read.csv('data/iRecord Butterflies 2016 10 11.csv',
+#                 stringsAsFactors = FALSE)
+# 
+# # Make the date column a date
+# iRB$date_start <- as.Date(as.character(iRB$date_start))
+# 
+# # App started in 2014 so crop data to then
+# iRB <- iRB[iRB$date_start >= "2014-01-01", ]
+# 
+# # Only keep the butterflies
+# iRB <- iRB[iRB$taxon_group == 'insect - butterfly', ]
+# 
+# # I need to mask the butterfly data (and other datasets)
+# # to the UK as they are a bit all over the place
+# 
+# # Convert to SpatialPoints
+# spPoints_LL <- SpatialPointsDataFrame(coords = iRB[ , c('long', 'lat')],
+#                                       data = iRB[ , colnames(iRB)[!colnames(iRB) %in% c('long', 'lat')]])
+# 
+# # Data is lat long
+# proj4string(spPoints_LL) <- CRS("+init=epsg:4326")
+# 
+# # Get a polygon for the UK boundary
+# IoM <- readRDS('data/country shapefiles/IMN_adm0.rds')
+# GBR <- readRDS('data/country shapefiles/GBR_adm0.rds')
+# 
+# # Adjust rownames so they dont crash between files
+# IoM <- spChFIDs(IoM, paste("IoM", row.names(IoM), sep="."))
+# 
+# # Bind the 2 together and transform to the same CRS as
+# # the point data
+# UK <- spTransform(rbind(IoM, GBR), CRSobj = spPoints_LL@proj4string)
+# 
+# # Subset points to the UK polygon
+# UKpoints <- spPoints_LL[UK, ]
+# 
+# # Convert to a data.frame
+# UKpointsDF <- as.data.frame(UKpoints)
+# 
+# # save for future use
+# save(UKpointsDF, file = 'data/iRB_UK.rdata')
 
-# App started in 2014 so crop data to then
-iRB <- iRB[as.Date(as.character(iRB$date_start), format = '%d/%m/%Y') >= "2014-01-01", ]
-
-# Make the date column a date
-iRB$date_start <- as.Date(as.character(iRB$date_start), format = '%d/%m/%Y')
-
-# I need to mask the butterfly data (and other datasets)
-# to the UK as they are a bit all over the place
+# load in cleaned data saved above
+load('data/iRB_UK.rdata')
+iRB <- UKpointsDF
+rm(list = c('UKpointsDF'))
 ```
 
 ## Metrics
@@ -143,7 +181,7 @@ activityRatio <- function(recorder_name,
                       active_days = NA))
   } else {
     
-    # Get unique dates
+  # Get unique dates
   dates <- unique(data[,date_col])
   
   # Get the first and last date
@@ -397,13 +435,14 @@ I think the first step for all of these metrics is to turn the  points into a Sp
 
 
 ```{r spatialpoint}
-
 # Function takes data and username and returns spatial metrics
 spatial_behaviour <- function(data, recorder_name,
                               latitude_col, longitude_col,
                               recorder_col = 'recorders',
                               upper_percentile = 95,
-                              lower_percentile = 50){
+                              lower_percentile = 60,
+                              h = 5000,
+                              res = 1000){
   
   if(is.factor(recorder_name)){
     recorder_name <- as.character(recorder_name)
@@ -422,31 +461,81 @@ spatial_behaviour <- function(data, recorder_name,
     # Convert to Eastings Northings to get meters on X and Y
     spPoint_UK <- spTransform(spPoints_LL, "+init=epsg:27700")
     
-    # Calculate the larger MCP 
-    mcp_poly_upper <- mcp(spPoint_UK,
-                          percent = upper_percentile,
-                          unin = 'm',
-                          unout = 'km2')
+    # set up grid
+    # This allows us to ensure there is space for the 
+    # isoclines to be drawn and that the pixel res is the
+    # same - here 1km
+    minlong <- floor(bbox(spPoint_UK)['long','min'] - (10*h))
+    minlat <- floor(bbox(spPoint_UK)['lat','min'] - (10*h))
+    maxlong <- ceiling(bbox(spPoint_UK)['long','max'] + (10*h))
+    maxlat <- ceiling(bbox(spPoint_UK)['lat','max'] + (10*h))
+
+    grid_ras <- raster(ext = extent(minlong, maxlong, minlat, maxlat),
+                       res = res,
+                       crs = projection(spPoint_UK))
+                       
+                       # matrix(NA,
+                       # ncol = ceiling(nlat),
+                       # nrow = ceiling(nlong)))
     
-    # Calculate the smaller MCP 
-    mcp_poly_lower <- mcp(spPoint_UK,
-                          percent = lower_percentile,
-                          unin = 'm',
-                          unout = 'km2')
+    grid_SP <- as(grid_ras, "SpatialPixels")
     
+    # Try kernel density
+    KD <- kernelUD(xy = spPoint_UK, h = h, grid = grid_SP)
+    # image(KD)
+    KA <- kernel.area(KD,
+                percent = c(lower_percentile, upper_percentile),
+                unin = "m",
+                unout = "km2")
+    area_upper <- KA[2]
+    area_lower <- KA[1]
+    poly_lower <- getverticeshr(KD, percent = lower_percentile)
+    poly_upper <- getverticeshr(KD, percent = upper_percentile)
+    rm(list = 'KD')
+    npolys_upper <- length(poly_upper@polygons[[1]]@Polygons)
+    npolys_lower <- length(poly_lower@polygons[[1]]@Polygons)
+
+    # # Calculate the Local convex hull
+    # LCH_poly <- LoCoH.k(xy = spPoint_UK,
+    #                     k =  10,
+    #                     unin = 'm',
+    #                     unout = 'km',
+    #                     duplicates = 'remove')
+    # 
+    # # Extract percentiles
+    # LCH_MCHu <- spoldf2MCHu(LCH_poly)
+    # poly_upper <- getverticeshr.MCHu(LCH_MCHu,
+    #                                  percent = upper_percentile)
+    # poly_lower <- getverticeshr.MCHu(LCH_MCHu,
+    #                                  percent = lower_percentile)
+    # 
+    # npolys_upper <- length(poly_upper@polygons[[1]]@Polygons)
+    # npolys_lower <- length(poly_lower@polygons[[1]]@Polygons)
+    # 
+    # area_upper <- MCHu2hrsize(x = LCH_MCHu, percent = upper_percentile,
+    #                           plotit = FALSE)
+    # area_lower <- MCHu2hrsize(x = LCH_MCHu, percent = lower_percentile,
+    #                           plotit = FALSE)
+
     return(list(recorder = recorder_name,
                 spPoint_UK = spPoint_UK,
-                mcp_poly_upper = mcp_poly_upper,
-                mcp_poly_lower = mcp_poly_lower,
-                upper_area = mcp_poly_upper$area,
-                lower_area = mcp_poly_lower$area,
-                ratio = mcp_poly_lower$area/mcp_poly_upper$area,
+                # poly = LCH_poly,
+                poly_upper = poly_upper,
+                poly_lower = poly_lower,
+                upper_n_poly = npolys_upper,
+                lower_n_poly = npolys_lower,
+                upper_area = area_upper,
+                lower_area = area_lower,
+                ratio = area_lower/area_upper,
                 n = n_row))
   } else {
     return(list(recorder = recorder_name,
                 spPoint_UK = NA,
-                mcp_poly_upper = NA,
-                mcp_poly_lower = NA,
+                # poly = NA,
+                poly_upper = NA,
+                poly_lower = NA,
+                upper_n_poly = NA,
+                lower_n_poly = NA,
                 upper_area = NA,
                 lower_area = NA,
                 ratio = NA,
@@ -455,45 +544,66 @@ spatial_behaviour <- function(data, recorder_name,
  
 }
 
-# Test on one recorder
-David_spatial <- spatial_behaviour(data = iRB, recorder_name = 'Roy, David',
-                                   latitude_col = 'lat', longitude_col = 'st_x')
-
 # Function for plotting records
 plot_ratio <- function(data){
-  par(mfrow = c(1,2))
+  om <- par("mar")
+  omf <- par('mfrow')
+  par(mfrow = c(1,2), mar = c(1,1,1,1))
   data(UK)
-  plot_GIS(UK, new.window = FALSE, main = 'Distribution of records')
+  plot_GIS(UK, new.window = FALSE,
+           main = 'Distribution of records',
+           show.axis = FALSE, show.grid = FALSE)
   points(data$spPoint_UK, pch = 3, col = 'blue')
   
-  # Plot David's heat map
-  plot(data$spPoint_UK,
-       main = paste(data$recorder, '-', 'Ratio:', round(data$ratio, 4)),
-       col = 'blue')
-  upper_polygon <- data$mcp_poly_upper@polygons[[1]]@Polygons[[1]]@coords
-  polygon(x = upper_polygon[,1],
-        y = upper_polygon[,2])
-  lower_polygon <- data$mcp_poly_lower@polygons[[1]]@Polygons[[1]]@coords
-  polygon(x = lower_polygon[,1],
-        y = lower_polygon[,2], 
-        col = 'red', border = 'red')
-  par(mfrow = c(1,1))
+  # Plot heat map
+  plot(data$poly_upper,
+       main = paste('\n\n', data$recorder, '-', 'Ratio:',
+                    round(data$ratio, 4), '\n',
+                    'Upper/lower polygons:', data$upper_n_poly,
+                    '/', data$lower_n_poly, '\n',
+                    'Total Area:', data$upper_area),
+       col = 'grey')
+  plot(data$poly_lower, add = TRUE,
+       col = 'red', border = 'red')
+  points(data$spPoint_UK, col = rgb(0,0,0,0.4),
+         pch = 3)
+  par(mfrow = omf,
+      mar = om)
 }
 
-# Plot
-plot_ratio(data = David_spatial)
-## NOTE DAVID HAS A RECORD FROM OUTSIDE THE UK ##
+for(h in c(1000, 5000, 10000)){
+  DD <- spatial_behaviour(data = iRB, recorder_name = 'Roy, David',
+                          latitude_col = 'lat', longitude_col = 'long',
+                          h = h)
+  plot_ratio(data = DD)
+  
+}
+
+# for(recorder in c('Partridge, Francesca', 'Harley, Ross')){
+#   
+#   RD <- spatial_behaviour(data = iRB, recorder_name = recorder,
+#                           latitude_col = 'lat', longitude_col = 'long',
+#                           h = 5000)
+#   plot_ratio(data = RD)
+#   
+# }
 
 # Apply to all recorders
+pdf(file = 'recorderAreas.pdf')
 all_spatial <- lapply(unique(iRB$recorders), FUN = function(x){
+  # cat(paste(x, '\n'))
   recorder_info <- spatial_behaviour(data = iRB, recorder_name = x,
-                                     latitude_col = 'lat', longitude_col = 'st_x')
+                                     latitude_col = 'lat', longitude_col = 'long')
+  if(!is.na(recorder_info$ratio)) plot_ratio(recorder_info)
   return(data.frame(recorder = recorder_info$recorder,
                     upper_area = recorder_info$upper_area,
                     lower_area = recorder_info$lower_area,
+                    upper_n_poly = recorder_info$upper_n_poly,
+                    lower_n_poly = recorder_info$lower_n_poly,
                     ratio = recorder_info$ratio,
                     n = recorder_info$n))
 })
+dev.off()
 
 # combine results
 temp <- do.call(rbind, all_spatial)
@@ -508,7 +618,6 @@ Lets have a look at two people with very different ratios
 ```{r plot_ratios}
 # Get the names of top and bottom
 temp <- temp[order(temp$ratio, decreasing = TRUE),]
-
 top <- as.character(head(temp$recorder, 1))
 bottom <- as.character(tail(temp$recorder, 1))
 
@@ -517,7 +626,7 @@ for(i in c(top, bottom)){
   top_d <- spatial_behaviour(data = iRB,
                              recorder_name = i,
                              latitude_col = 'lat',
-                             longitude_col = 'st_x')
+                             longitude_col = 'long')
   plot_ratio(data = top_d)
 }
 ```
@@ -636,3 +745,134 @@ plot(log(rarity_preference$n[rarity_preference$n >5]),
 ```
 
 The more records you record the less you deviate from the median. This is probably because you only get extreme values where the sample size is small.
+
+### Species accumulation curve
+
+The rate at which a recorder accumulates species over time recorded could be seen as a measure of their effort and expertise. The time scale will be measured in days recorded (not days elapsed). This measure will need to be normalised within a taxonomic group as clearly one can accumulate species more rapidly for birds than amphibians and reptiles. Note that while we look only at active days we have no way of accounting for actual time (hrs) recorded as a 10 minute search on one days appears the same as a 3 hour search on another. This metric is therefore an approximation only.
+
+```{r species_accumulation}
+# This can be run with all data
+species_accumulation <- function(data, recorder_name,
+                                 n_taxa, prediction_days = c(10, 50),
+                                 sp_col = 'preferred_taxon',
+                                 date_col = 'date_start',
+                                 recorder_col = 'recorders',
+                                 plot = FALSE, ...){
+
+  # Get the data for this recorder
+  rec_data <- data[data[,recorder_col] == recorder_name,
+                   c(date_col, sp_col)]
+
+  # sort dates
+  dates <- sort(unique(rec_data$date_start))
+  
+  # Only carry out this test on people with more than the 
+  # required number of days in their data
+  if(length(dates) >= max(prediction_days)){
+    
+    # accumulation function
+    acc <- function(x){
+      length(unique(rec_data[,sp_col][rec_data[,date_col] <= x]))
+    }
+    
+    species_accumulation_data <- sapply(dates, FUN = acc)
+    day <- seq_along(species_accumulation_data)
+    
+    # Fit a model
+    m <- glm(formula = species_accumulation_data ~ day + sqrt(day))
+    m_sum <- summary(m)
+    # predict atleast up to day 100 (could be dangerous)
+    # but just for visualiation purposes
+    days_to_predict <- ifelse(test = length(dates) > max(prediction_days),
+                              yes = length(dates),
+                              no = prediction_days)
+    predicted <- predict(m, newdata = data.frame(day = 1:days_to_predict))
+    
+    if(plot){
+      plot(species_accumulation_data, 
+           main = paste('Species accumulation - ', recorder_name),
+           xlab = 'days',
+           ylab = 'Number of species',
+           col = 'grey40',
+           pch = 20, 
+           ... = ...)
+      lines(predicted, col = 'red', lwd = 3, lty = 5)
+      for(pred_day in prediction_days){
+        lines(x = rep(pred_day, 2), y = c(0, predicted[pred_day]),
+        lty = 3, col = 'grey20', lwd = 2)
+        text(x = pred_day, y = predicted[pred_day] + 5, cex = 1.5, 
+           labels = round(predicted[pred_day]/n_taxa, 2))
+      }
+    }  
+    
+    # create named vector for predictions
+    x <- predicted[prediction_days]/n_taxa
+    names(x) <- paste0('d', prediction_days)
+    x <- data.frame(t(x))
+    x$recorder <- as.character(recorder_name)
+    
+    return(list(species_accumulation_data = species_accumulation_data,
+                predicted_data = predicted,
+                day_pred = x,
+                n_day = length(dates)))
+      
+  } else {
+    
+    # empty df
+    eDF <- as.data.frame(cbind(matrix(data = rep(NA,
+                                          length(prediction_days)),
+                               nrow = 1,
+                               dimnames = list(recorder_name, paste0('d', prediction_days)))))
+    
+    eDF$recorder <- as.character(recorder_name)
+    
+    return(list(species_acculation_data = NA,
+                predicted_data = NA,
+                day_pred = eDF,
+                n_day = length(dates)))
+    
+  }
+}
+
+# Run for a few people
+par(mfrow = c(3, 2))
+
+# top recorders
+user_dates <- tapply(iRB$date_start, iRB$recorders, FUN = function(x) length(unique(x)))
+recorders <- sample(names(sort(user_dates[user_dates > 50], decreasing = TRUE)), size = 6)
+
+for(recorder in recorders){
+user_acc <- species_accumulation(data = iRB, n_taxa = length(unique(iRB$preferred_taxon)),
+                                 recorder_name = recorder,
+                                 plot = TRUE,
+                                 prediction_days = seq(10, 50, 10),
+                                 # xlim = c(0, 100),
+                                 ylim = c(0, length(unique(iRB$preferred_taxon))))
+}
+
+par(mfrow = c(1, 1))
+
+# Calculate for everyone
+all_acc_list <- lapply(X = unique(iRB$recorders), FUN = function(x){
+  day_pred <- species_accumulation(recorder_name = x,
+                                   data = iRB,
+                                   n_taxa = length(unique(iRB$preferred_taxon)),
+                                   plot = FALSE,
+                                   prediction_days = seq(10, 50, 10))$day_pred
+})
+
+all_acc <- do.call(rbind, all_acc_list)
+
+# These values clearly rise over time
+boxplot(na.omit(all_acc[,!colnames(all_acc) %in% 'recorder']),
+        xlab = 'Day',
+        ylab = 'Proportion of taxa recorded',
+        main = 'Species accumulation over time')
+
+# How do these correlate?
+cor_data <- cor.matrix(na.omit(all_acc[,!colnames(all_acc) %in% 'recorder']))
+ggcorplot(cor.mat = cor_data,
+          data = na.omit(all_acc[,!colnames(all_acc) %in% 'recorder']),
+          var_text_size = 5,
+          cor_text_limits = c(5,10))
+```
