@@ -6,14 +6,21 @@ output: pdf_document
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE, cache = TRUE)
+knitr::opts_chunk$set(echo = TRUE, cache = FALSE)
 ```
-```{r libraries, echo = FALSE, message = FALSE}
+```{r libraries, echo = FALSE, include = FALSE}
 library(sp)
 library(BRCmap)
 library(adehabitatHR)
 library(raster)
 library(Deducer)
+library(BRCmap)
+library(parallel)
+# Calculate the number of cores
+no_cores <- detectCores() - 1
+# Initiate cluster
+cl <- makeCluster(no_cores)
+clusterEvalQ(cl,{library(sp);library(BRCmap);library(adehabitatHR);library(raster);library(Deducer);library(BRCmap)})
 ```
 ```{r data_cleaning, echo = FALSE}
 # # There are a range of data cleaning steps that I will probably need to do
@@ -81,6 +88,7 @@ One issue that we have across these metrics and some others is that recording is
 I suggest we use a percentage cut off, for example take the period of the year that contains 90% of the data. Lets have a look at how this might work
 
 ```{r summer_period}
+Sys.time()
 # First lets have a look at the distribution of 
 # records through the year
 jday <- as.POSIXlt(iRB$date_start)$yday
@@ -150,7 +158,6 @@ hist(summer_iRB$Jday, 100)
 
 # Here are the cuts
 attr(summer_iRB, 'cutoffs')
-
 ```
 
 ### Activity ratio
@@ -208,9 +215,9 @@ activityRatio(data = summer_iRB, recorder_name = 'August, Tom')
 ## David is a more active recorder than Tom ##
 
 # Run for everyone
-all_AR <- do.call(rbind, lapply(X = unique(iRB$recorders),
-                                FUN = activityRatio,
-                                data = summer_iRB))
+all_AR <- do.call(rbind, parLapply(cl, X = unique(iRB$recorders),
+                                   fun = activityRatio,
+                                   data = summer_iRB))
 
 # Lets have a look at some of these
 head(all_AR, 20)
@@ -282,9 +289,9 @@ weeklyDevotedDays(data = summer_iRB, recorder_name = 'August, Tom')
 ## David contributes more of his time than Tom ##
 
 # Run for everyone
-all_WDD <- do.call(rbind, lapply(X = unique(iRB$recorders),
-                                 FUN = weeklyDevotedDays,
-                                 data = summer_iRB))
+all_WDD <- do.call(rbind, parLapply(cl, X = unique(iRB$recorders),
+                                    fun = weeklyDevotedDays,
+                                    data = summer_iRB))
 
 # Lets have a look at some of these
 head(all_WDD, 20)
@@ -398,9 +405,9 @@ periodicity(data = summer_iRB, recorder_name = 'August, Tom')
 # Tom has less days of data to work with
 
 # Run for everyone
-all_P <- do.call(rbind, lapply(X = unique(iRB$recorders),
-                               FUN = periodicity,
-                               data = iRB))
+all_P <- do.call(rbind, parLapply(cl, X = unique(iRB$recorders),
+                                  fun = periodicity,
+                                  data = iRB))
 
 # Lets have a look at some of these
 head(all_P, 20)[c(5,8,1),]
@@ -453,7 +460,7 @@ spatial_behaviour <- function(data, recorder_name,
   if(n_row >= 5){
   
     # Convert to SpatialPoints
-    spPoints_LL <- SpatialPoints(iRB[iRB[,recorder_col] == recorder_name,
+    spPoints_LL <- sp::SpatialPoints(iRB[iRB[,recorder_col] == recorder_name,
                                      c(longitude_col, latitude_col)])
     # Data is lat long
     proj4string(spPoints_LL) <- CRS("+init=epsg:4326")
@@ -589,12 +596,9 @@ for(h in c(1000, 5000, 10000)){
 # }
 
 # Apply to all recorders
-pdf(file = 'recorderAreas.pdf')
-all_spatial <- lapply(unique(iRB$recorders), FUN = function(x){
-  # cat(paste(x, '\n'))
+sum_spatial <- function(x){
   recorder_info <- spatial_behaviour(data = iRB, recorder_name = x,
                                      latitude_col = 'lat', longitude_col = 'long')
-  if(!is.na(recorder_info$ratio)) plot_ratio(recorder_info)
   return(data.frame(recorder = recorder_info$recorder,
                     upper_area = recorder_info$upper_area,
                     lower_area = recorder_info$lower_area,
@@ -602,12 +606,15 @@ all_spatial <- lapply(unique(iRB$recorders), FUN = function(x){
                     lower_n_poly = recorder_info$lower_n_poly,
                     ratio = recorder_info$ratio,
                     n = recorder_info$n))
-})
-dev.off()
+}
+
+clusterExport(cl, varlist = c('spatial_behaviour', 'iRB'))
+all_spatial_list <- parLapply(cl, unique(iRB$recorders),
+                         fun = sum_spatial)
 
 # combine results
-temp <- do.call(rbind, all_spatial)
-temp <- temp[temp$n > 400, ]
+all_spatial <- do.call(rbind, all_spatial_list)
+temp <- all_spatial[all_spatial$n > 400, ]
 
 # Lets have a look at some people who have recorded a lot
 temp[order(temp$ratio, decreasing = TRUE),]
@@ -653,7 +660,9 @@ taxa_breadth <- function(data, recorder_name,
                     n = nrow(data_rec)))
 }
 
-taxa_breadth <- do.call(rbind, lapply(unique(iRB$recorders), FUN = taxa_breadth, data = iRB))
+taxa_breadth <- do.call(rbind, parLapply(cl, unique(iRB$recorders),
+                                         fun = taxa_breadth,
+                                         data = iRB))
 
 temp <- taxa_breadth[taxa_breadth$n > 400, ]
 
@@ -691,9 +700,9 @@ species_rank <- function(data, recorder_name,
 }
 
 rarity_preference <- do.call(rbind,
-                             lapply(unique(iRB$recorders),
-                                    FUN = species_rank,
-                                    data = iRB))
+                             parLapply(cl, unique(iRB$recorders),
+                                       fun = species_rank,
+                                       data = iRB))
 
 temp <- rarity_preference[rarity_preference$n > 400, ]
 
@@ -826,14 +835,18 @@ species_accumulation <- function(data, recorder_name,
     
     eDF$recorder <- as.character(recorder_name)
     
-    return(list(species_acculation_data = NA,
+    return(list(species_accumulation_data = NA,
                 predicted_data = NA,
                 day_pred = eDF,
                 n_day = length(dates)))
     
   }
 }
+```
 
+When we plot some of the species accumulation curves you can see variation between recorders. Note that the height of the plateaux varies as does the time taken to reach that point. Is this biased by location? Presumably a recorder in Scotland will always have a lower plateau than one in the South of England? Also in a less species rich area the rate of accumulation will be less? Another way to assess this would be to model d20 by recorder and mean latitude of that recorders observations. The coefficient of recorder would then be adjusted for latitude.
+
+```{r top_examples, fig.height=9, fig.width=6}
 # Run for a few people
 par(mfrow = c(3, 2))
 
@@ -849,11 +862,18 @@ user_acc <- species_accumulation(data = iRB, n_taxa = length(unique(iRB$preferre
                                  # xlim = c(0, 100),
                                  ylim = c(0, length(unique(iRB$preferred_taxon))))
 }
+```
 
+We can explore the values in more detail when we calculate them for everyone with enought records. Note we only calculate these values for recorders with a total number of days equal or more to the highest number of days we want to predict
+
+```{r species_accumulation_all}
 par(mfrow = c(1, 1))
 
+clusterExport(cl, varlist = c('species_accumulation', 'iRB'))
 # Calculate for everyone
-all_acc_list <- lapply(X = unique(iRB$recorders), FUN = function(x){
+all_acc_list <- parLapply(cl,
+                          X = unique(iRB$recorders),
+                          fun = function(x){
   day_pred <- species_accumulation(recorder_name = x,
                                    data = iRB,
                                    n_taxa = length(unique(iRB$preferred_taxon)),
@@ -876,3 +896,132 @@ ggcorplot(cor.mat = cor_data,
           var_text_size = 5,
           cor_text_limits = c(5,10))
 ```
+
+This correlation plot shows that - of hte cut offs I chose - 20 is the probably the best value. This is because it is the metric that is best correlated with all the other values chossen.
+
+### List-length: Species per 'visit'
+
+This is the metric that Nick Isaac is most interested in. The interest is in knowing, or predicting, whether a person is recording complete lists or is recording ad hoc sightings. The difference is important as the former can be used to infer absence whereas the latter cannot.
+
+Here I create a few metrics to quantify this including mean list-length, median list-length and variance.
+
+We define visit as a unique combination of date and location. Location is taken to be a 1km square in this example.
+
+```{r list_length}
+listLength <- function(data,
+                       recorder_name,
+                       threshold = 10,
+                       plot = FALSE,
+                       sp_col = 'preferred_taxon',
+                       date_col = 'date_start',
+                       recorder_col = 'recorders',
+                       location_col = 'kmsq'){
+ 
+  # get the data for this recorder
+  rec_data <- data[data[ ,recorder_col] == recorder_name, ]
+  
+  # create a unique visit column
+  rec_data$visit <- paste(rec_data[ , date_col], rec_data[ , location_col],
+                      sep = '_')
+  
+  # calculate list-lengths
+  rec_LL <- tapply(rec_data$preferred_taxon, rec_data$visit,
+                   FUN = function(x) length(unique(x)))
+
+  # Only calculate if the number of lists meets the threshold
+  if(length(rec_LL) >= threshold){
+    if(plot) hist(rec_LL,
+                  breaks = max(rec_LL),
+                  main = 'Histogram of list-length',
+                  xlab = 'List-length')   
+    
+    mean_LL <- mean(rec_LL)
+    median_LL <- median(rec_LL)
+    variance <- var(rec_LL)
+    # proportion of 'visits' that are of length 1
+    p1 <- sum(rec_LL == 1)/length(rec_LL)
+    
+    df <- data.frame(recorder = recorder_name,
+                     mean_LL = mean_LL,
+                     median_LL = median_LL,
+                     variance = variance,
+                     p1 = p1,
+                     n_lists = length(rec_LL))
+    return(df)
+  } else {
+    
+    df <- data.frame(recorder = recorder_name,
+                     mean_LL = NA,
+                     median_LL = NA,
+                     variance = NA,
+                     p1 = NA,
+                     n_lists = length(rec_LL))
+    return(df)
+  }
+}
+
+# Add location column
+raw_kmsq <- gps_latlon2gr(latitude = iRB$lat,
+                          longitude = iRB$long,
+                          return_type = 'gr')
+
+iRB$kmsq <- reformat_gr(raw_kmsq[1,], prec_out = 1000)
+
+# Run for a recorder
+listLength(data = iRB, recorder_name = 'Roy, David', plot = TRUE)
+
+# Run for all
+all_LL <- parLapply(cl, unique(iRB$recorders), fun = listLength,
+                    data = iRB)
+
+LL_tab <- do.call(rbind, all_LL)
+```
+
+I wonder if there are correlations between the metrics and the number of lists?
+
+```{r cor_LL}
+# How do these correlate?
+LL_tab$log_n_lists <- log(LL_tab$n_lists)
+cor_data <- cor.matrix(variables = LL_tab[,!colnames(LL_tab) %in% 'recorder'])
+ggcorplot(cor.mat = cor_data,
+          data = na.omit(LL_tab),
+          var_text_size = 5,
+          cor_text_limits = c(5,10))
+
+# Doesn't look like n_lists is strongly correlated
+# ... but it is
+m <- glm(n_lists ~ p1 + variance + median_LL + mean_LL, data = LL_tab, family = 'poisson')
+summary(m)
+Sys.time()
+```
+
+It seems that the more lists you record the shorter they tend to be, this could be causally linked. People who record single species lists will accumulate lists more rapidly as it is less effort per list.
+
+## Combine metrics
+
+Now we have allthe metrics we need we can combine them together into one table to be analysed
+
+```{r combine_metrics}
+# Combine the metric data.frames
+all_metrics <- merge(all_AR, all_WDD, by = 'recorder', all = T)
+all_metrics <- merge(all_metrics, all_P, by = 'recorder', all = T)
+all_metrics <- merge(all_metrics, all_spatial, by = 'recorder', all = T)
+all_metrics <- merge(all_metrics, taxa_breadth, by = 'recorder', all = T)
+all_metrics <- merge(all_metrics, rarity_preference, by = 'recorder', all = T)
+all_metrics <- merge(all_metrics, all_acc, by = 'recorder', all = T)
+all_metrics <- merge(all_metrics, LL_tab, by = 'recorder', all = T)
+
+# Let's try a big correlation matrix
+cor_data <- cor.matrix(variables = all_metrics[,!colnames(all_metrics) %in% 'recorder'])
+ggcorplot(cor.mat = cor_data,
+          data = all_metrics,
+          var_text_size = 5,
+          cor_text_limits = c(5,10))
+```
+
+# Categorisation
+
+```{r close_cluster, echo = FALSE}
+stopCluster(cl)
+```
+
