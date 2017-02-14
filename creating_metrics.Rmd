@@ -6,9 +6,9 @@ output: pdf_document
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE, cache = FALSE)
+knitr::opts_chunk$set(echo = TRUE, cache = TRUE)
 ```
-```{r libraries, echo = FALSE, include = FALSE}
+```{r libraries, echo = FALSE, include = FALSE, cache = FALSE}
 library(sp)
 library(BRCmap)
 library(adehabitatHR)
@@ -226,9 +226,10 @@ head(all_AR, 20)
 I think this metric tells a story in a combination of the ratio and the total number of days. I think the ratio means more when the recorder has been recording for a long duration
 
 ```{r plot_activity_ratio1}
-# Have a look at the distribution of these 2 metrics
+# Have a look at the distribution of these metrics
 # There looks like there could be an effect of year
 hist(all_AR$total_duration, breaks = 30)
+hist(all_AR$active_days, breaks = 80)
 hist(all_AR$activity_ratio)
 ```
 
@@ -672,7 +673,7 @@ temp[order(temp$taxa_prop, decreasing = TRUE),]
 
 ### Species Rarity
 
-We want to capture the rarity of the species that people record. For example are they just recording the common species or are they only recording the rare ones, or perhaps they are recording everything. Since we don't know the real frequency distribution we can only compare people to the global average in the dataset. We can look to see what the distribution of species rank for each recorder is and how this compares to all records. A recorder only interested in rare species will have a median rank higher than the average. A recorder only recording common species will have a value lower than the average.
+We want to capture the rarity of the species that people record. For example are they just recording the common species or are they only recording the rare ones, or perhaps they are recording everything. Since we don't know the real frequency distribution we can only compare people to the global average in the dataset. We can look to see what the distribution of species rank for each recorder is and how this compares to all records. A recorder only interested in rare species will have a median rank higher than the average. A recorder only recording common species will have a value lower than the average. The number of taxa is going to vary between groups so to make these values comparable between groups we need to scale the ranks, here I scale to 100.
 
 
 ```{r species_rank}
@@ -683,6 +684,10 @@ species_rank <- function(data, recorder_name,
   
   data <- data[,c(sp_col, recorder_col)]
   rank_species <- rank(abs(table(data[,sp_col])-max(table(data[,sp_col]))))
+  
+  # scale ranks to 100
+  rank_species <- (rank_species/max(rank_species)) * 100
+  
   sp_counts <- table(data[,sp_col])
   
   rank_reps <- rep(rank_species, sp_counts)
@@ -693,8 +698,8 @@ species_rank <- function(data, recorder_name,
   recorder_data$rank <- rank_species[recorder_data[ ,sp_col]]
   
   return(data.frame(recorder = as.character(recorder_name),
-                    median = median(recorder_data$rank),
-                    median_diff = median(recorder_data$rank) - grand_median,
+                    median_rarity = median(recorder_data$rank),
+                    median_diff_rarity = median(recorder_data$rank) - grand_median,
                     stdev = sd(recorder_data$rank),
                     n = nrow(recorder_data)))
 }
@@ -704,7 +709,9 @@ rarity_preference <- do.call(rbind,
                                        fun = species_rank,
                                        data = iRB))
 
-temp <- rarity_preference[rarity_preference$n > 400, ]
+temp <- cbind(rarity_preference[rarity_preference$n > 400, 'recorder'],
+              round(rarity_preference[rarity_preference$n > 400, c('median_rarity', 'median_diff_rarity','stdev','n')], 2))
+colnames(temp)[1] <- 'recorder'
 
 # Lets have a look at some people who have recorded a lot
 temp[order(temp$median_diff, decreasing = TRUE),]
@@ -716,10 +723,10 @@ Here `median_diff` gives the difference between the grand median for all records
 This could be correlated to the number of records. 
 
 ```{r rarity_nrec}
-mod <- glm(median ~ log(n), data = rarity_preference, family = 'quasipoisson')
+mod <- glm(median_rarity ~ log(n), data = rarity_preference, family = 'quasipoisson')
 summary(mod)
 plot(log(rarity_preference$n),
-     rarity_preference$median,
+     rarity_preference$median_rarity,
      xlab = 'log(N)',
      ylab = 'Median rarity')
 ```
@@ -728,10 +735,10 @@ There is a significant negative relationship. The more records you make the lowe
 
 ```{r rarity_nrec_above}
 rarity_preference_above <- rarity_preference[rarity_preference$n > 5, ]
-mod <- glm(median ~ log(n), data = rarity_preference_above, family = 'quasipoisson')
+mod <- glm(median_rarity ~ log(n), data = rarity_preference_above, family = 'quasipoisson')
 summary(mod)
 plot(log(rarity_preference_above$n),
-     rarity_preference_above$median,
+     rarity_preference_above$median_rarity,
      xlab = 'log(N)',
      ylab = 'Median rarity')
 ```
@@ -739,7 +746,7 @@ plot(log(rarity_preference_above$n),
 Okay, the relationship falls down once we get rid of the people who only record a few species. I suggest this metric not be estimates for people who contribute only a few records. The relationship might actually be between deviation from the median and `n`.
 
 ```{r rarity_nrec_deviation}
-rarity_preference$median_diff_abs <- abs(rarity_preference$median_diff)
+rarity_preference$median_diff_abs <- abs(rarity_preference$median_diff_rarity)
 mod <- glm(median_diff_abs ~ log(n), data = rarity_preference, family = 'quasipoisson')
 summary(mod)
 plot(log(rarity_preference$n),
@@ -938,14 +945,20 @@ listLength <- function(data,
     mean_LL <- mean(rec_LL)
     median_LL <- median(rec_LL)
     variance <- var(rec_LL)
+    
     # proportion of 'visits' that are of length 1
     p1 <- sum(rec_LL == 1)/length(rec_LL)
+    
+    # proportion of 'visits' that are of 4 or more
+    p4 <- sum(rec_LL >= 4)/length(rec_LL)
+    
     
     df <- data.frame(recorder = recorder_name,
                      mean_LL = mean_LL,
                      median_LL = median_LL,
                      variance = variance,
                      p1 = p1,
+                     p4 = p4,
                      n_lists = length(rec_LL))
     return(df)
   } else {
@@ -955,6 +968,7 @@ listLength <- function(data,
                      median_LL = NA,
                      variance = NA,
                      p1 = NA,
+                     p4 = NA,
                      n_lists = length(rec_LL))
     return(df)
   }
@@ -965,7 +979,7 @@ raw_kmsq <- gps_latlon2gr(latitude = iRB$lat,
                           longitude = iRB$long,
                           return_type = 'gr')
 
-iRB$kmsq <- reformat_gr(raw_kmsq[1,], prec_out = 1000)
+iRB$kmsq <- reformat_gr(raw_kmsq, prec_out = 1000)
 
 # Run for a recorder
 listLength(data = iRB, recorder_name = 'Roy, David', plot = TRUE)
@@ -992,7 +1006,6 @@ ggcorplot(cor.mat = cor_data,
 # ... but it is
 m <- glm(n_lists ~ p1 + variance + median_LL + mean_LL, data = LL_tab, family = 'poisson')
 summary(m)
-Sys.time()
 ```
 
 It seems that the more lists you record the shorter they tend to be, this could be causally linked. People who record single species lists will accumulate lists more rapidly as it is less effort per list.
@@ -1011,15 +1024,100 @@ all_metrics <- merge(all_metrics, rarity_preference, by = 'recorder', all = T)
 all_metrics <- merge(all_metrics, all_acc, by = 'recorder', all = T)
 all_metrics <- merge(all_metrics, LL_tab, by = 'recorder', all = T)
 
-# Let's try a big correlation matrix
-cor_data <- cor.matrix(variables = all_metrics[,!colnames(all_metrics) %in% 'recorder'])
-ggcorplot(cor.mat = cor_data,
-          data = all_metrics,
-          var_text_size = 5,
-          cor_text_limits = c(5,10))
+# Save this to file
+save(all_metrics, file = 'output/all_metrics1.rdata')
+
+# Let's see a summary of all this data
+summary(all_metrics)
 ```
 
 # Categorisation
+
+We will first want to drop metrics that are clearly duplications of one another, i.e. do not provide additional information. Up until now we have simply been interested in gathering together as many metrics that provide information about the recorders as we can.
+
+## What to catagorise?
+
+I think we will be better off by catagorising people in three different dimensions. Spatially, temporally and data content This makes the analyses an bit easier to handle as it breaks it down but also builds a modular system which might result in three types of spatial recording, 3 types of taxonomic recording and 3 types of temporal recording rather than 27 (`3*3*3`) recording types. Of course these 27 'types' could be easily reconstructed using the 'types' from each dimension. I think this will make the results easier to interpret and also probably reflects more the reality of the situation. I suspect a recorders spatial pattern of recording will be driven by different factors than their temporal recording pattern etc.
+
+I have reviewed the 38 variables in the table above and reduced it to what I see as the most valuable metrics. Some of these metric do not make sense if very few records are availbale, as a result I suggest we only apply this to recorders with atleast 10 active summer days. Those that fail this test can be placed in their own group `Dabblers` (as in Boakes?). Variables marked with `[S]` use summer only data in there calculation.
+
+### Temporal
+
+- *Activity ratio* [S]: this capture the proportion of a recorders time they dedicate to recording. “The proportion of days on which the volunteer was active in relation to the total days he/she remained linked to the project” (Ponciano and Brasileiro 2014)
+- *Active days* [S]: this is a measure of the absolute effort given to recording. This is chosen over raw number of records which is likely to be taxa specific.
+- *Median weekly devoted days* [S]: This is an adaptation of the Daily Devoted Time in (Ponciano and Brasileiro 2014) which can be adapted by using days in a week (summer only) rather than hours in a day. Unlike Activity Ratio this metric is not affected by periods of absence as it is only calculates across weeks when recording occured.
+- *Periodicity* [S]: The median time elapsed between each pair of sequential active days. The captures regularity which isn't really captured by the other metrics.
+- *Periodicity variation* [S]: “The standard deviation of the times elapsed between each pair of sequential active days” (Ponciano and Brasileiro 2014).
+
+### Spatial
+
+- *Upper Area*: This is the area of the upper percentile (95%) polygon. This gives the extent of a recorders activites.
+- *Upper Polygon Number*: This is the numbver of polygons that make up the upper percentile (95%) polygon. The greater the number the more fractured the records are.
+- *Upper:Core Ratio*: This is the ration between the upper percentile (95%) and lower percentile (60%) polygons. This gives an indication of how aggregated the data points are.
+
+![The three measures of recorder's spatial behaviour are all independent. Here each column shows a change in one variable while the others are held constant](figures/spatial_variables.png)
+
+### Data content
+
+- *Proportion of Taxa Recorded*: This is the number of unique taxa recorded by an individual as a proportion of the total number of taxa recorded by all recorders.
+- *Median Rarity Difference*: Species are ranked according to the number of records in the entire dataset, and scaled to 100. This variable is the difference between the median rank overall and the median rank for the recorder. Negative numbers mean the recorder preferntially records common species while positive number means the recorder records rarer species.
+- *p1*: The proportion of lists (day-location) that have a single record on them. This give the proportion of record that are 'ad-hoc'
+
+```{r subset_variables}
+key_variables <- all_metrics[,c('recorder', 'activity_ratio',
+                                'active_days', 'median_weekly_devoted_days',
+                                'periodicity', 'periodicity_variation',
+                                'upper_area', 'upper_n_poly', 'ratio',
+                                'taxa_prop', 'median_diff', 'p1')]
+```
+
+### Dropping Dabblers
+
+Drop the recorders with less that 10 active days
+
+```{r subset_colinearity}
+table(key_variables$active_days >= 10)
+# The majority of recorders for this group are 'dabblers'
+
+key_variables <- key_variables[key_variables$active_days >= 10, ]
+```
+
+
+## Testing Co-linearity
+
+Let's have a look to see how correlated these selected measures are.
+
+```{r colinearity}
+cor_data <- cor.matrix(variables = key_variables[,!colnames(key_variables) %in% 'recorder'])
+ggcorplot(cor.mat = cor_data,
+          data = key_variables,
+          var_text_size = 2,
+          cor_text_limits = c(3,5))
+```
+
+
+## Catagorisation methods
+
+There are numerous methods for catagorisation out there and we need one which is going to give us the best results for our data. I think this method needs to:
+
+* Work unsupervised. We do not want to have to catagorise recorders manually as we want the categorisation to emerge from the data.
+* Work with `NA`s. We may have quite a few `NA`s in our data since some of the metrics can only be estimated for a subset of recorders, we want a method that can deal with this.
+* Easy to reuse. We want a method that returns a model that can be applied to other data sets to see how our categories translate to other citizen science projects.
+
+
+## Principal components analysis
+
+In the first instance it is probably a good idea to have a go at dimensionality reduction for each of the 3 'dimensions' and to assess the results.
+
+```{r pca}
+summary(key_variables)
+library(vegan)
+
+all.pca <- rda(na.omit(key_variables[,-1]), scale = TRUE)
+
+summary(all.pca)
+plot(all.pca)
+```
 
 ```{r close_cluster, echo = FALSE}
 stopCluster(cl)
